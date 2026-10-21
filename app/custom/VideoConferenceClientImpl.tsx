@@ -12,6 +12,7 @@ import {
 } from 'livekit-client';
 import { DebugMode } from '@/lib/Debug';
 import { useEffect, useMemo, useState } from 'react';
+import { Captions } from '@/lib/Captions';
 import { KeyboardShortcuts } from '@/lib/KeyboardShortcuts';
 import { SettingsMenu } from '@/lib/SettingsMenu';
 import { useSetupE2EE } from '@/lib/useSetupE2EE';
@@ -91,6 +92,7 @@ export function VideoConferenceClientImpl(props: {
             process.env.NEXT_PUBLIC_SHOW_SETTINGS_MENU === 'true' ? SettingsMenu : undefined
           }
         />
+        <Captions />
         <DebugMode logLevel={LogLevel.debug} />
       </RoomContext.Provider>
     </div>
