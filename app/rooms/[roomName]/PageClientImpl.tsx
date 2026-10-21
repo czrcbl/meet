@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import { Captions } from '@/lib/Captions';
 import { decodePassphrase } from '@/lib/client-utils';
 import { DebugMode } from '@/lib/Debug';
 import { KeyboardShortcuts } from '@/lib/KeyboardShortcuts';
@@ -240,6 +241,7 @@ function VideoConferenceComponent(props: {
           chatMessageFormatter={formatChatMessageLinks}
           SettingsComponent={SHOW_SETTINGS_MENU ? SettingsMenu : undefined}
         />
+        <Captions />
         <DebugMode />
         <RecordingIndicator />
       </RoomContext.Provider>

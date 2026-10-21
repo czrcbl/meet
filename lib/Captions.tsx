@@ -2,6 +2,7 @@ import { useTranscriptions } from '@livekit/components-react';
 import * as React from 'react';
 
 const MAX_LINES = 3;
+const HIDE_AFTER_MS = 10_000;
 
 /**
  * Renders the `lk.transcription` text streams as a caption overlay.
@@ -28,6 +29,21 @@ export function Captions() {
       .slice(-MAX_LINES);
   }, [transcriptions]);
 
+  // Changes whenever the visible text does, including an interim line being
+  // refined in place. The idle timer runs off this and local time rather than
+  // `streamInfo.timestamp`, which carries the sender's clock.
+  const signature = lines.map((l) => `${l.streamInfo.id}:${l.text}`).join('|');
+  const [visible, setVisible] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!signature) {
+      return;
+    }
+    setVisible(true);
+    const timer = setTimeout(() => setVisible(false), HIDE_AFTER_MS);
+    return () => clearTimeout(timer);
+  }, [signature]);
+
   if (lines.length === 0) {
     return null;
   }
@@ -45,13 +61,25 @@ export function Captions() {
         gap: '0.25rem',
         padding: '0.5rem 0.75rem',
         borderRadius: 'var(--lk-border-radius)',
-        backgroundColor: 'rgba(0, 0, 0, 0.6)',
+        // Opaque enough to hold up over bright video. The blur and the ring
+        // keep the block readable even where the backdrop is busy rather than
+        // bright, and the text shadow covers the case where a browser drops
+        // backdrop-filter entirely.
+        backgroundColor: 'rgba(0, 0, 0, 0.82)',
+        backdropFilter: 'blur(6px)',
+        WebkitBackdropFilter: 'blur(6px)',
+        boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.12), 0 2px 12px rgba(0, 0, 0, 0.5)',
         color: 'var(--lk-fg)',
+        textShadow: '0 1px 2px rgba(0, 0, 0, 0.9)',
         fontSize: '0.95rem',
         lineHeight: 1.4,
         textAlign: 'center',
         pointerEvents: 'none',
         zIndex: 10,
+        // Kept mounted while hidden so the fade can play, and so the last
+        // lines are still there to fade back in on the next segment.
+        opacity: visible ? 1 : 0,
+        transition: 'opacity 400ms ease-out',
       }}
     >
       {lines.map((line) => (
@@ -62,7 +90,11 @@ export function Captions() {
             opacity: line.streamInfo.attributes?.['lk.transcription_final'] === 'true' ? 1 : 0.6,
           }}
         >
-          <span style={{ color: 'var(--lk-fg4)' }}>{line.participantInfo.identity}: </span>
+          {/* --lk-fg4 is near-white, so weight rather than colour separates
+              the speaker from what they said. */}
+          <span style={{ color: 'var(--lk-fg4)', fontWeight: 600 }}>
+            {line.participantInfo.identity}:{' '}
+          </span>
           {line.text}
         </div>
       ))}
