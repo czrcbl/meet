@@ -1,8 +1,38 @@
-import { useTranscriptions } from '@livekit/components-react';
+import { useRoomContext, useTranscriptions } from '@livekit/components-react';
+import type { Room } from 'livekit-client';
 import * as React from 'react';
 
 const MAX_LINES = 3;
-const HIDE_AFTER_MS = 10_000;
+// How long a line stays up after its text last changed, then how long it takes
+// to fade out before it is dropped.
+const LINE_TTL_MS = 6_000;
+const FADE_MS = 400;
+
+type Transcription = ReturnType<typeof useTranscriptions>[number];
+
+/** Local times for one segment; `text`/`final` detect when it last changed. */
+type Stamp = { firstSeen: number; lastChanged: number; text: string; final: boolean };
+
+const segmentOf = (t: Transcription) => t.streamInfo.attributes?.['lk.segment_id'] ?? t.streamInfo.id;
+const isFinal = (t: Transcription) => t.streamInfo.attributes?.['lk.transcription_final'] === 'true';
+
+/**
+ * The speaker is whoever owns the transcribed track. The stream's sender is
+ * the transcriber, which only matches the speaker when the SFU accepted it
+ * publishing on their behalf (agent tokens), so it is just the fallback.
+ */
+function speakerOf(room: Room, line: Transcription): string {
+  const trackSid = line.streamInfo.attributes?.['lk.transcribed_track_id'];
+  if (trackSid) {
+    const owner = [room.localParticipant, ...room.remoteParticipants.values()].find((p) =>
+      p.trackPublications.has(trackSid),
+    );
+    if (owner) {
+      return owner.name || owner.identity;
+    }
+  }
+  return line.participantInfo.identity;
+}
 
 /**
  * Renders the `lk.transcription` text streams as a caption overlay.
@@ -10,39 +40,77 @@ const HIDE_AFTER_MS = 10_000;
  * inside the room container.
  */
 export function Captions() {
+  const room = useRoomContext();
+  // components-core already folds interim and final streams sharing an
+  // `lk.segment_id` into one entry, so there is one item per segment here.
   const transcriptions = useTranscriptions();
 
-  const lines = React.useMemo(() => {
-    // Interim and final results arrive as separate text streams sharing an
-    // `lk.segment_id`; keep the newest stream per segment so a line is
-    // refined in place instead of repeating.
-    const bySegment = new Map<string, (typeof transcriptions)[number]>();
-    for (const t of transcriptions) {
-      const key = t.streamInfo.attributes?.['lk.segment_id'] ?? t.streamInfo.id;
-      const seen = bySegment.get(key);
-      if (!seen || seen.streamInfo.timestamp <= t.streamInfo.timestamp) {
-        bySegment.set(key, t);
-      }
-    }
-    return Array.from(bySegment.values())
-      .sort((a, b) => a.streamInfo.timestamp - b.streamInfo.timestamp)
-      .slice(-MAX_LINES);
-  }, [transcriptions]);
-
-  // Changes whenever the visible text does, including an interim line being
-  // refined in place. The idle timer runs off this and local time rather than
-  // `streamInfo.timestamp`, which carries the sender's clock.
-  const signature = lines.map((l) => `${l.streamInfo.id}:${l.text}`).join('|');
-  const [visible, setVisible] = React.useState(false);
+  // Each line ages on its own, timed with local time rather than
+  // `streamInfo.timestamp`: that carries the sender's clock, and it is bumped on
+  // every interim update, so it can neither order lines stably nor age them.
+  const stamps = React.useRef(new Map<string, Stamp>());
+  const initialized = React.useRef(false);
+  const [now, setNow] = React.useState(() => Date.now());
 
   React.useEffect(() => {
-    if (!signature) {
+    const t = Date.now();
+    // Segments already there on mount are history, not something just said.
+    const seenAt = initialized.current ? t : -Infinity;
+    initialized.current = true;
+    const live = new Set<string>();
+    for (const tr of transcriptions) {
+      const key = segmentOf(tr);
+      live.add(key);
+      const final = isFinal(tr);
+      const stamp = stamps.current.get(key);
+      if (!stamp) {
+        stamps.current.set(key, { firstSeen: seenAt, lastChanged: seenAt, text: tr.text, final });
+      } else if (stamp.text !== tr.text || stamp.final !== final) {
+        Object.assign(stamp, { lastChanged: t, text: tr.text, final });
+      }
+    }
+    // The list is cleared on disconnect; forget those segments too.
+    for (const key of stamps.current.keys()) {
+      if (!live.has(key)) {
+        stamps.current.delete(key);
+      }
+    }
+    setNow(t);
+  }, [transcriptions]);
+
+  const lines = React.useMemo(
+    () =>
+      transcriptions
+        .map((t) => ({ key: segmentOf(t), t, stamp: stamps.current.get(segmentOf(t)) }))
+        .filter(
+          (l): l is typeof l & { stamp: Stamp } =>
+            !!l.stamp && l.t.text.trim() !== '' && now - l.stamp.lastChanged < LINE_TTL_MS + FADE_MS,
+        )
+        // By when the segment started, so lines refined in place stay put
+        // while several people talk at once.
+        .sort((a, b) => a.stamp.firstSeen - b.stamp.firstSeen)
+        .slice(-MAX_LINES)
+        .map((l) => ({ ...l, fading: now - l.stamp.lastChanged >= LINE_TTL_MS })),
+    [transcriptions, now],
+  );
+
+  // Wake up at the next point a line starts fading or is dropped, so lines go
+  // away even when nothing new arrives.
+  React.useEffect(() => {
+    let next = Infinity;
+    for (const { lastChanged } of stamps.current.values()) {
+      for (const deadline of [lastChanged + LINE_TTL_MS, lastChanged + LINE_TTL_MS + FADE_MS]) {
+        if (deadline > now && deadline < next) {
+          next = deadline;
+        }
+      }
+    }
+    if (next === Infinity) {
       return;
     }
-    setVisible(true);
-    const timer = setTimeout(() => setVisible(false), HIDE_AFTER_MS);
+    const timer = setTimeout(() => setNow(Math.max(Date.now(), next)), next - Date.now());
     return () => clearTimeout(timer);
-  }, [signature]);
+  }, [now]);
 
   if (lines.length === 0) {
     return null;
@@ -76,24 +144,24 @@ export function Captions() {
         textAlign: 'center',
         pointerEvents: 'none',
         zIndex: 10,
-        // Kept mounted while hidden so the fade can play, and so the last
-        // lines are still there to fade back in on the next segment.
-        opacity: visible ? 1 : 0,
-        transition: 'opacity 400ms ease-out',
+        // The box fades with its last line instead of lingering empty.
+        opacity: lines.every((l) => l.fading) ? 0 : 1,
+        transition: `opacity ${FADE_MS}ms ease-out`,
       }}
     >
-      {lines.map((line) => (
+      {lines.map(({ key, t: line, fading }) => (
         <div
-          key={line.streamInfo.id}
+          key={key}
           style={{
             // Dim a segment until the transcriber marks it final.
-            opacity: line.streamInfo.attributes?.['lk.transcription_final'] === 'true' ? 1 : 0.6,
+            opacity: fading ? 0 : isFinal(line) ? 1 : 0.6,
+            transition: `opacity ${FADE_MS}ms ease-out`,
           }}
         >
           {/* --lk-fg4 is near-white, so weight rather than colour separates
               the speaker from what they said. */}
           <span style={{ color: 'var(--lk-fg4)', fontWeight: 600 }}>
-            {line.participantInfo.identity}:{' '}
+            {speakerOf(room, line)}:{' '}
           </span>
           {line.text}
         </div>
