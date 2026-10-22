@@ -51,6 +51,10 @@ export function Captions() {
   const stamps = React.useRef(new Map<string, Stamp>());
   const initialized = React.useRef(false);
   const [now, setNow] = React.useState(() => Date.now());
+  // Bumped whenever the stamps change. `now` alone can miss an update that
+  // lands in the same millisecond as the last one, as setting a state to the
+  // value it already has skips the re-render.
+  const [stampsVersion, bumpStamps] = React.useReducer((n: number) => n + 1, 0);
 
   React.useEffect(() => {
     const t = Date.now();
@@ -76,6 +80,7 @@ export function Captions() {
       }
     }
     setNow(t);
+    bumpStamps();
   }, [transcriptions]);
 
   const lines = React.useMemo(
@@ -91,7 +96,10 @@ export function Captions() {
         .sort((a, b) => a.stamp.firstSeen - b.stamp.firstSeen)
         .slice(-MAX_LINES)
         .map((l) => ({ ...l, fading: now - l.stamp.lastChanged >= LINE_TTL_MS })),
-    [transcriptions, now],
+    // stampsVersion: the stamps live in a ref, so this is what tells the memo
+    // they moved on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [transcriptions, now, stampsVersion],
   );
 
   // Wake up at the next point a line starts fading or is dropped, so lines go
