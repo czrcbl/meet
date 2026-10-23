@@ -15,6 +15,9 @@ type Stamp = { firstSeen: number; lastChanged: number; text: string; final: bool
 
 const segmentOf = (t: Transcription) => t.streamInfo.attributes?.['lk.segment_id'] ?? t.streamInfo.id;
 const isFinal = (t: Transcription) => t.streamInfo.attributes?.['lk.transcription_final'] === 'true';
+/** Groups a speaker's segments into one caption line: one per transcribed track. */
+const speakerKeyOf = (t: Transcription) =>
+  t.streamInfo.attributes?.['lk.transcribed_track_id'] ?? t.participantInfo.identity;
 
 /**
  * The speaker is whoever owns the transcribed track. The stream's sender is
@@ -83,24 +86,45 @@ export function Captions() {
     bumpStamps();
   }, [transcriptions]);
 
-  const lines = React.useMemo(
-    () =>
-      transcriptions
-        .map((t) => ({ key: segmentOf(t), t, stamp: stamps.current.get(segmentOf(t)) }))
-        .filter(
-          (l): l is typeof l & { stamp: Stamp } =>
-            !!l.stamp && l.t.text.trim() !== '' && now - l.stamp.lastChanged < LINE_TTL_MS + FADE_MS,
-        )
-        // By when the segment started, so lines refined in place stay put
-        // while several people talk at once.
-        .sort((a, b) => a.stamp.firstSeen - b.stamp.firstSeen)
-        .slice(-MAX_LINES)
-        .map((l) => ({ ...l, fading: now - l.stamp.lastChanged >= LINE_TTL_MS })),
+  // One line per speaker, showing their latest segment. Each final starts a new
+  // segment, so ordering segments would move a speaker's next sentence below
+  // everyone else's; the line keeps its place instead.
+  const lines = React.useMemo(() => {
+    const bySpeaker = new Map<string, { t: Transcription; stamp: Stamp }[]>();
+    for (const t of transcriptions) {
+      const stamp = stamps.current.get(segmentOf(t));
+      if (!stamp || t.text.trim() === '') {
+        continue;
+      }
+      const key = speakerKeyOf(t);
+      bySpeaker.set(key, [...(bySpeaker.get(key) ?? []), { t, stamp }]);
+    }
+
+    const visible = [];
+    for (const [key, segments] of bySpeaker) {
+      segments.sort((a, b) => a.stamp.firstSeen - b.stamp.firstSeen);
+      // The line opened with the first segment that came after everything
+      // before it had already left the screen; until then it is the same line.
+      let opened = -Infinity;
+      let shownUntil = -Infinity;
+      for (const { stamp } of segments) {
+        if (stamp.firstSeen >= shownUntil) {
+          opened = stamp.firstSeen;
+        }
+        shownUntil = Math.max(shownUntil, stamp.lastChanged + LINE_TTL_MS + FADE_MS);
+      }
+      const { t, stamp } = segments[segments.length - 1];
+      if (now - stamp.lastChanged < LINE_TTL_MS + FADE_MS) {
+        visible.push({ key, t, opened, fading: now - stamp.lastChanged >= LINE_TTL_MS });
+      }
+    }
+    // By when the speaker's line opened, so it stays put while they keep
+    // talking and others talk at once.
+    return visible.sort((a, b) => a.opened - b.opened).slice(-MAX_LINES);
     // stampsVersion: the stamps live in a ref, so this is what tells the memo
     // they moved on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [transcriptions, now, stampsVersion],
-  );
+  }, [transcriptions, now, stampsVersion]);
 
   // Wake up at the next point a line starts fading or is dropped, so lines go
   // away even when nothing new arrives.
